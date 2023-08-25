@@ -177,7 +177,7 @@ class RosNMEADriver(object):
             time = data['utc_time'] if 'utc_time' in data.keys() else 0
             return rospy.Time.from_sec(time)
 
-    def get_lat_long(self, data):
+    def get_lat_lon(self, data):
         latitude = data['latitude']
         if data['latitude_direction'] == 'S':
             latitude = -latitude
