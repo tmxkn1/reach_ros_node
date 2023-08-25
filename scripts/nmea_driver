@@ -1,0 +1,195 @@
+#! /usr/bin/env python
+
+# Software License Agreement (BSD License)
+#
+# Copyright (c) 2023, Zhengyi Jiang
+# Copyright (c) 2013, Eric Perko
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+#
+#  * Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+#  * Redistributions in binary form must reproduce the above
+#    copyright notice, this list of conditions and the following
+#    disclaimer in the documentation and/or other materials provided
+#    with the distribution.
+#  * Neither the names of the authors nor the names of their
+#    affiliated organizations may be used to endorse or promote products derived
+#    from this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+# FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+# COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+# INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+# BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+# ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+import socket
+import serial
+import rospy
+import reach_ros_node.driver
+
+
+class ReachBaseHandler:
+    def __init__(self, connection_type):
+        self.connection_type = connection_type
+
+    def start(self):
+        rospy.loginfo(
+            f'Connecting to Reach RTK using {self.connection_type}: {self.get_address_info()}')
+        self.open_connection()
+        try:
+            driver = reach_ros_node.driver.RosNMEADriver()
+            while not rospy.is_shutdown():
+                # GPS = soc.recv(1024)
+                data = self.buffered_readLine().strip()
+                # Debug print message line
+                # print(data)
+                try:
+                    driver.process_line(data)
+                except ValueError as e:
+                    rospy.logerr(
+                        "Value error, likely due to missing fields in the NMEA message. Error was: %s." % e)
+        except rospy.ROSInterruptException:
+            self.close_connection()
+
+    def reconnect_to_device(self):
+        rospy.logwarn('Device disconnected. Reconnecting...')
+        self.close_connection()
+        self.open_connection()
+
+    def open_connection(self):
+        pass
+
+    def close_connection(self):
+        pass
+
+    def buffered_readLine(self):
+        pass
+
+    def get_address_info(self):
+        pass
+
+
+class ReachSocketHandler(ReachBaseHandler):
+    def __init__(self, host, port):
+        self.host = host
+        self.port = port
+        super().__init__('TCP')
+
+    def connect_to_device(self):
+        while not rospy.is_shutdown():
+            try:
+                self.soc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.soc.settimeout(5.0)
+                self.soc.connect((self.host, self.port))
+                rospy.loginfo(
+                    'Successfully connected to device, starting publishing!')
+                return
+            except socket.timeout:
+                rospy.logwarn_throttle(
+                    30, 'Socket connection timeout. Retrying...')
+                continue
+            except Exception as e:
+                rospy.logerr("Socket connection error. Error was: %s." % e)
+                exit()
+
+    def close_connection(self):
+        self.soc.close()
+
+    def buffered_readLine(self):
+        line = ""
+        while not rospy.is_shutdown():
+            try:
+                part = self.soc.recv(1)
+            except socket.timeout:
+                self.reconnect_to_device()
+                continue
+            if not part or len(part) == 0:
+                self.reconnect_to_device()
+                continue
+            if part != "\n":
+                line += part
+            elif part == "\n":
+                break
+        return line
+
+    def get_address_info(self):
+        return f"{self.host}:{self.port}"
+
+
+class ReachUARTHandler(ReachBaseHandler):
+
+    def __init__(self, dev, baud):
+        self.dev = dev
+        self.baud = baud
+        super().__init__('UART')
+
+    def open_connection(self):
+        while not rospy.is_shutdown():
+            try:
+                self.serial = serial.Serial(
+                    port=self.dev, baudrate=self.baud, timeout=5.0)
+                rospy.loginfo(
+                    'Successfully connected to device, starting publishing!')
+                return
+            except serial.SerialTimeoutException:
+                rospy.logwarn_throttle(
+                    30, 'Serial connection timeout. Retrying...')
+                continue
+            except Exception as e:
+                rospy.logerr(f"Serial connection error: {e}.")
+                exit()
+
+    def close_connection(self):
+        self.serial.close()
+
+    def buffered_readLine(self):
+        line = ""
+        while not rospy.is_shutdown():
+            try:
+                line = self.serial.readline().decode('utf-8')
+            except serial.SerialTimeoutException:
+                self.reconnect_to_device()
+                continue
+            if not line or len(line) == 0:
+                # self.reconnect_to_device()
+                continue
+        return line
+
+    def get_address_info(self):
+        return f"{self.dev}, baud rate {self.baud}"
+
+
+def start_uart():
+    dev = rospy.get_param('~dev', '/dev/ttyACM0')
+    baud = rospy.get_param('~baud', 115200)
+    device = ReachUARTHandler(dev, baud)
+    device.start()
+
+
+def start_tcp():
+    host = rospy.get_param('~host', '')
+    port = rospy.get_param('~port', 9000)
+    device = ReachSocketHandler(host, port)
+    device.start()
+
+
+if __name__ == '__main__':
+    rospy.init_node('reach_ros_node')
+    connection = rospy.get_param('~connection', 'uart')
+    if connection == 'uart':
+        start_uart()
+    elif connection == 'tcp':
+        start_tcp()
+    else:
+        rospy.logerr(f'Unknown connection type {connection}')
