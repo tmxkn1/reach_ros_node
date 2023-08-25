@@ -7,7 +7,7 @@ catkin_python_setup()
 catkin_package()
 
 install(PROGRAMS
-   scripts/nmea_tcp_driver
+   scripts/nmea_driver
    DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
